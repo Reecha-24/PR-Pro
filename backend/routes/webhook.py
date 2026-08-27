@@ -47,6 +47,8 @@ async def github_webhook(
         repo = payload["repository"]["name"]
         pull_number = payload["pull_request"]["number"]
         pr = payload["pull_request"]
+        pr_title = pr.get("title", "")
+        pr_description = pr.get("body") or ""
         repo_full_name = payload["repository"]["full_name"]  # e.g., "owner/repo-name"
         head_sha = pr["head"]["sha"]
         # Retrieve installation token (from Day 1 Auth Layer)
@@ -55,8 +57,9 @@ async def github_webhook(
         raw_diff = await fetch_pr_diff(owner, repo, pull_number, installation_token)
         processed_diff = parse_raw_diff(raw_diff)
         print(f"processed_diff : {processed_diff}")
-
-        files_payload = [file.model_dump() for file in processed_diff]
+        str_pr_diff = json.dumps([item.model_dump() for item in processed_diff])
+        # files_payload = [file.model_dump() for file in processed_diff]
+        print(f"type_diff:{type(str_pr_diff)}  + {str_pr_diff}")
         
         new_job = Job(
             pr_id=pull_number,
@@ -71,9 +74,11 @@ async def github_webhook(
         queue.enqueue(
             review_pr,
             pr_id=pull_number,
+            pr_title =pr_title,
+            pr_description = pr_description,
             repo=repo_full_name,
             head_sha=head_sha,
-            files=files_payload,
+            pr_diff=str(str_pr_diff),
             job_timeout=300,   # 5 min ceiling per PR review
             retry=None,        # see note below on retries
         )
