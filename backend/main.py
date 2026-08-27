@@ -1,22 +1,27 @@
+from contextlib import asynccontextmanager
 import os
-import string
-from dotenv import load_dotenv, dotenv_values
-load_dotenv()
 
-from fastapi import Body, Depends, FastAPI, APIRouter
-# from database import Base, engine, SessionLocal
-from routes import webhook
-# from sqlalchemy import create_engine, Column, Integer, String, text
-# import models
-
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from database import AsyncSessionLocal, Base, engine
+import models  # Must be imported so Base.metadata knows about Job, PRReview, Suggestion
+from routes import webhook
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Asynchronously create tables on startup
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 fe_url = os.getenv("FE_URL", "http://localhost:3000")
 origins = [fe_url] if fe_url else ["*"]
-origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -25,8 +30,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Parent router - everything mounted on this gets an /api prefix.
-# api_router = APIRouter(prefix="/api")
 api_router = APIRouter()
 
 
@@ -34,8 +37,6 @@ api_router = APIRouter()
 async def health_check():
     return {"status": "healthy"}
 
+
 api_router.include_router(webhook.router)
-# Base.metadata.create_all(bind=engine)
-
-
 app.include_router(api_router)

@@ -1,9 +1,14 @@
-from fastapi import APIRouter,BackgroundTasks,  Header,Request,Response, HTTPException
+from fastapi import APIRouter,BackgroundTasks,  Header,Request,Response, HTTPException, Depends
 import json
 from services.webhook_handler import parse_pr_payload, verify_webhook_signature
 from services.github_service import fetch_pr_diff,get_installation_access_token, parse_raw_diff
+from services.redis_service import queue, review_pr
 from config import settings
 from fastapi.responses import JSONResponse
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import engine, Base, get_db
+from models.jobs import Job, JobStatus
 router = APIRouter(
     prefix='/webhooks',
     tags=['webhook']
@@ -13,7 +18,8 @@ router = APIRouter(
 async def github_webhook(
     request: Request,
     x_hub_signature_256: str = Header(default=""),
-    x_github_event: str = Header(default="")
+    x_github_event: str = Header(default=""),
+    db: AsyncSession = Depends(get_db)
 ):
     # Read raw body for signature verification
     body = await request.body()
@@ -27,8 +33,6 @@ async def github_webhook(
         payload = json.loads(body)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
-    
-    print(f"Payload 31 :{payload}")
 
     # Only process PR events
     if x_github_event != "pull_request":
@@ -42,14 +46,37 @@ async def github_webhook(
         owner = payload["repository"]["owner"]["login"]
         repo = payload["repository"]["name"]
         pull_number = payload["pull_request"]["number"]
-        
+        pr = payload["pull_request"]
+        repo_full_name = payload["repository"]["full_name"]  # e.g., "owner/repo-name"
+        head_sha = pr["head"]["sha"]
         # Retrieve installation token (from Day 1 Auth Layer)
         installation_token = await get_installation_access_token(installation_id)
         # Fetch the diff
         raw_diff = await fetch_pr_diff(owner, repo, pull_number, installation_token)
         processed_diff = parse_raw_diff(raw_diff)
         print(f"processed_diff : {processed_diff}")
-        # PASS TO NEXT STEP: Send `raw_diff` to your parser / Redis worker
+
+        files_payload = [file.model_dump() for file in processed_diff]
+        
+        new_job = Job(
+            pr_id=pull_number,
+            repo=repo_full_name,
+            head_sha=head_sha,
+            status=JobStatus.PENDING
+        )
+        db.add(new_job)
+        await db.commit()
+        await db.refresh(new_job)
+
+        queue.enqueue(
+            review_pr,
+            pr_id=pull_number,
+            repo=repo_full_name,
+            head_sha=head_sha,
+            files=files_payload,
+            job_timeout=300,   # 5 min ceiling per PR review
+            retry=None,        # see note below on retries
+        )
 
         return {
             "status": "queued",
