@@ -1,5 +1,5 @@
 import httpx
-from typing import Optional, List
+from typing import Optional, List,Dict,Any
 import time
 import jwt
 from config import settings
@@ -22,7 +22,6 @@ def generate_app_jwt() -> str:
     
     return jwt.encode(payload, private_key, algorithm="RS256")
 
-
 async def get_installation_access_token(installation_id: int) -> str:
     """Exchanges App JWT for a repo-scoped installation access token."""
     app_jwt = generate_app_jwt()
@@ -42,11 +41,6 @@ async def get_installation_access_token(installation_id: int) -> str:
         # Returns dict containing {"token": "ghs_xxxx...", "expires_at": "..."}
         return response.json()["token"]
 
-from typing import Optional
-import httpx
-
-GITHUB_API_URL = "https://api.github.com"
-
 async def fetch_pr_diff(
     owner: str, 
     repo: str, 
@@ -65,7 +59,6 @@ async def fetch_pr_diff(
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         return await _fetch_pr_diff_in_chunks(client, owner, repo, pull_number, headers)
-
 
 async def _fetch_pr_diff_in_chunks(
     client: httpx.AsyncClient, 
@@ -111,7 +104,6 @@ async def _fetch_pr_diff_in_chunks(
 
     return "\n".join(diff_chunks)
 
-
 async def _fetch_single_file_patch(
     client: httpx.AsyncClient, 
     raw_url: Optional[str], 
@@ -121,7 +113,6 @@ async def _fetch_single_file_patch(
         return None
     res = await client.get(raw_url, headers=headers)
     return res.text if res.status_code == 200 else None
-
 
 # Matches hunk header format: @@ -old_start,old_count +new_start,new_count @@
 HUNK_HEADER_REGEX = re.compile(r"^@@\s+-(?P<old_start>\d+)(?:,(?P<old_count>\d+))?\s+\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))?\s+@@")
@@ -223,3 +214,58 @@ def parse_raw_diff(raw_diff: str) -> List[ParsedFileDiff]:
             parsed_files.append(parsed_file)
             
     return parsed_files
+
+async def post_github_review(
+    repo: str,
+    pr_id: int,
+    head_sha: str,
+    body_summary: str,
+    inline_comments: List[Dict[str, Any]],
+    token: str
+) -> Dict[str, Any]:
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_id}/reviews"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+    payload = {
+        "commit_id": head_sha,
+        "body": body_summary,
+        "event": "COMMENT",
+        "comments": inline_comments
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload, headers=headers)
+
+        if response.status_code in (200, 201):
+            print(f"✅ Posted review to {repo}#{pr_id}")
+            return response.json()
+
+        # Handle 422 position errors...
+        if response.status_code == 422:
+            valid_comments = []
+            for comment in inline_comments:
+                test_payload = {
+                    "commit_id": head_sha,
+                    "body": "Test position",
+                    "event": "COMMENT",
+                    "comments": [comment]
+                }
+                test_resp = await client.post(url, json=test_payload, headers=headers)
+                if test_resp.status_code in (200, 201):
+                    valid_comments.append(comment)
+
+            final_payload = {
+                "commit_id": head_sha,
+                "body": body_summary + "\n\n*(Note: Invalid position comments were omitted)*",
+                "event": "COMMENT",
+                "comments": valid_comments
+            }
+            final_resp = await client.post(url, json=final_payload, headers=headers)
+            return final_resp.json()
+
+        response.raise_for_status()

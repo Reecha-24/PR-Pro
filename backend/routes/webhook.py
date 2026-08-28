@@ -79,16 +79,13 @@ async def github_webhook(
             repo=repo_full_name,
             head_sha=head_sha,
             pr_diff=str(str_pr_diff),
+            installation_id=installation_id,
             job_timeout=300,   # 5 min ceiling per PR review
             retry=None,        # see note below on retries
         )
 
-        return {
-            "status": "queued",
-            "pr": pull_number,
-            "diff_size_bytes": len(raw_diff)
-        }
-    return {"status": "skipped"}
+        return Response(status_code=200)
+    return Response(status_code=200)
 
     # if action not in ("opened", "synchronize"):
     #     return Response(status_code=200)
