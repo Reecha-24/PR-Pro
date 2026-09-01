@@ -1,3 +1,4 @@
+import os
 import httpx
 from typing import Optional, List,Dict,Any
 import time
@@ -8,16 +9,39 @@ from schemas.db_entry import DiffLine, ParsedFileDiff
 
 GITHUB_API_URL = "https://api.github.com"
 
+def get_private_key() -> str:
+    """
+    Retrieves the private key string from either:
+    1. settings.GITHUB_PRIVATE_KEY (Env variable string, handles escaped '\\n')
+    2. settings.PRIVATE_KEY_PATH (File on disk)
+    """
+    # 1. Try reading directly from environment/settings string
+    private_key = getattr(settings, "GITHUB_PRIVATE_KEY", None)
+    if private_key:
+        # Reconstruct real newlines if passed as a single-line string with escaped '\n'
+        return private_key.replace("\\n", "\n").strip()
+
+    # 2. Fall back to reading from disk
+    key_path = getattr(settings, "PRIVATE_KEY_PATH", None)
+    if key_path and os.path.exists(key_path):
+        with open(key_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    raise ValueError(
+        "GitHub Private Key not found! Ensure either GITHUB_PRIVATE_KEY "
+        "or PRIVATE_KEY_PATH is configured in your settings."
+    )
+
+
 def generate_app_jwt() -> str:
     """Generates a RS256-signed JWT valid for up to 10 minutes."""
-    with open(settings.PRIVATE_KEY_PATH, "r") as f:
-        private_key = f.read()
+    private_key = get_private_key()
 
     now = int(time.time())
     payload = {
-        "iat": now - 60,       # Issued 60s in past to account for clock drift
-        "exp": now + (10 * 60), # Maximum allowed expiry is 10 minutes
-        "iss": settings.GITHUB_APP_ID,
+        "iat": now - 60,        # Issued 60s in the past to handle clock drift
+        "exp": now + (10 * 60),  # Maximum allowed expiry for GitHub App JWT is 10 minutes
+        "iss": str(settings.GITHUB_APP_ID),
     }
     
     return jwt.encode(payload, private_key, algorithm="RS256")
@@ -223,7 +247,7 @@ async def post_github_review(
     inline_comments: List[Dict[str, Any]],
     token: str
 ) -> Dict[str, Any]:
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_id}/reviews"
+    url = f"{GITHUB_API_URL}/repos/{repo}/pulls/{pr_id}/reviews"
     
     headers = {
         "Authorization": f"Bearer {token}",
@@ -241,31 +265,38 @@ async def post_github_review(
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
 
+        # 1. Direct success path
         if response.status_code in (200, 201):
-            print(f"✅ Posted review to {repo}#{pr_id}")
-            return response.json()
+            try:
+                print(f"✅ Posted review to {repo}#{pr_id}")
+                return response.json()
+            except Exception as e:
+                print(f"Error parsing response JSON: {e}")
 
-        # Handle 422 position errors...
+        # 2. Fallback path for 422 position errors
         if response.status_code == 422:
-            valid_comments = []
+            print("⚠️ 422 Batch error detected. Falling back to individual comment posting...")
+            failed_count = 0
+
+            # Post each comment individually (this publishes them live)
             for comment in inline_comments:
-                test_payload = {
+                single_comment_payload = {
                     "commit_id": head_sha,
-                    "body": "Test position",
                     "event": "COMMENT",
                     "comments": [comment]
                 }
-                test_resp = await client.post(url, json=test_payload, headers=headers)
-                if test_resp.status_code in (200, 201):
-                    valid_comments.append(comment)
+                test_resp = await client.post(url, json=single_comment_payload, headers=headers)
+                if test_resp.status_code not in (200, 201):
+                    failed_count += 1
 
-            final_payload = {
+            # Post only the main summary body without re-submitting inline comments
+            note = f"\n\n*(Note: {failed_count} invalid position comment(s) omitted)*" if failed_count > 0 else ""
+            summary_payload = {
                 "commit_id": head_sha,
-                "body": body_summary + "\n\n*(Note: Invalid position comments were omitted)*",
-                "event": "COMMENT",
-                "comments": valid_comments
+                "body": body_summary + note,
+                "event": "COMMENT"
             }
-            final_resp = await client.post(url, json=final_payload, headers=headers)
+            final_resp = await client.post(url, json=summary_payload, headers=headers)
             return final_resp.json()
 
         response.raise_for_status()

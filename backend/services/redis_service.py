@@ -10,7 +10,12 @@ from services.github_service import ParsedFileDiff
 from services.response_synthesizer import synthesize_results
 from services.github_service import get_installation_access_token, post_github_review
 
-redis_conn = Redis(host="localhost", port=6379, db=0,protocol=2)
+redis_conn = Redis(
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    db=settings.REDIS_DB,
+    protocol=2
+)
 queue = Queue("reviews", connection=redis_conn)
 # Initialize OpenAI client
 openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)

@@ -1,0 +1,46 @@
+services:
+  # 1. Redis Service (Message Broker & Queue Store for RQ)
+  redis:
+    image: redis:7-alpine
+    container_name: pr-pro-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. FastAPI Backend API Service (main.py)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pr-pro-backend
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # 3. RQ Worker Service (RQ_worker.py)
+  rq_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pr-pro-rq-worker
+    command: python RQ_worker.py
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy

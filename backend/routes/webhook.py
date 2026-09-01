@@ -9,6 +9,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import engine, Base, get_db
 from models.jobs import Job, JobStatus
+
+from datetime import datetime
+
 router = APIRouter(
     prefix='/webhooks',
     tags=['webhook']
@@ -83,8 +86,9 @@ async def github_webhook(
             job_timeout=300,   # 5 min ceiling per PR review
             retry=None,        # see note below on retries
         )
-
+        print(f"time PR: {datetime.now().time()}")
         return Response(status_code=200)
+    print(f"time others: {datetime.now().time()}")
     return Response(status_code=200)
 
     # if action not in ("opened", "synchronize"):
